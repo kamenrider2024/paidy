@@ -1,10 +1,13 @@
 import Dependencies._
 
-name := "forex"
-version := "1.0.1"
+ThisBuild / version := "1.0.1"
 
-scalaVersion := "2.13.5"
-scalacOptions ++= Seq(
+ThisBuild / scalaVersion := "2.13.12"
+
+ThisBuild / resolvers +=
+  "Sonatype OSS Snapshots" at "https://oss.sonatype.org/content/repositories/snapshots"
+
+ThisBuild / scalacOptions ++= Seq(
   "-deprecation", // Emit warning and location for usages of deprecated APIs.
   "-encoding",
   "utf-8", // Specify character encoding used by source files.
@@ -46,24 +49,52 @@ scalacOptions ++= Seq(
   "-Ycache-macro-class-loader:last-modified" // and macro definitions. This can lead to performance improvements.
 )
 
-resolvers +=
-  "Sonatype OSS Snapshots" at "https://oss.sonatype.org/content/repositories/snapshots"
+lazy val forex = (project in file("."))
+  .enablePlugins(sbtdocker.DockerPlugin, JavaAppPackaging)
+  .settings(
+    name := "forex",
+    libraryDependencies ++= Seq(
+      compilerPlugin(Libraries.kindProjector),
+      Libraries.cats,
+      Libraries.catsEffect,
+      Libraries.fs2,
+      Libraries.scaffeine,
+      Libraries.http4sDsl,
+      Libraries.http4sServer,
+      Libraries.http4sClient,
+      Libraries.http4sCirce,
+      Libraries.circeCore,
+      Libraries.circeGeneric,
+      Libraries.circeGenericExt,
+      Libraries.circeParser,
+      Libraries.pureConfig,
+      Libraries.logback,
+      Libraries.scalaLogging,
+      Libraries.scalaTest % Test,
+      Libraries.scalaMock % Test,
+      Libraries.catsScalaTest % Test,
+      Libraries.catsEffectTest % Test
+    )
+  )
 
-libraryDependencies ++= Seq(
-  compilerPlugin(Libraries.kindProjector),
-  Libraries.cats,
-  Libraries.catsEffect,
-  Libraries.fs2,
-  Libraries.http4sDsl,
-  Libraries.http4sServer,
-  Libraries.http4sCirce,
-  Libraries.circeCore,
-  Libraries.circeGeneric,
-  Libraries.circeGenericExt,
-  Libraries.circeParser,
-  Libraries.pureConfig,
-  Libraries.logback,
-  Libraries.scalaTest        % Test,
-  Libraries.scalaCheck       % Test,
-  Libraries.catsScalaCheck   % Test
-)
+lazy val `integration-test` = project
+  .in(file("integration-test"))
+  .aggregate(forex)
+  .dependsOn(forex % "compile->compile;test->test;compile->test")
+
+docker / dockerfile := {
+  val jarFile: File = (Compile / packageBin / sbt.Keys.`package`).value
+  val classpath = (Compile / managedClasspath).value
+  val mainclass = (Compile / packageBin / mainClass).value.getOrElse(sys.error("Expected exactly one main class"))
+  val jarTarget = s"/app/${jarFile.getName}"
+
+  val classpathString = classpath.files.map("/app/" + _.getName)
+    .mkString(":") + ":" + jarTarget
+
+  new Dockerfile {
+    from("openjdk:17-alpine")
+    add(classpath.files, "/app/")
+    add(jarFile, jarTarget)
+    entryPoint("java", "-cp", classpathString, mainclass)
+  }
+}

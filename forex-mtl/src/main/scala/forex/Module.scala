@@ -1,24 +1,27 @@
 package forex
 
-import cats.effect.{ Concurrent, Timer }
-import forex.config.ApplicationConfig
+import cats.arrow.FunctionK
+import cats.effect.{Async, Sync, UnsafeRun}
+import com.typesafe.scalalogging.LazyLogging
+import forex.clients.RatesClient
 import forex.http.rates.RatesHttpRoutes
-import forex.services._
+import forex.model.config.ApplicationConfig
 import forex.programs._
 import org.http4s._
 import org.http4s.implicits._
-import org.http4s.server.middleware.{ AutoSlash, Timeout }
+import org.http4s.server.middleware.{AutoSlash, ErrorAction, ErrorHandling, Logger, Timeout}
 
-class Module[F[_]: Concurrent: Timer](config: ApplicationConfig) {
 
-  private val ratesService: RatesService[F] = RatesServices.dummy[F]
+class Module[F[_] : Async : UnsafeRun](config: ApplicationConfig) extends LazyLogging {
 
-  private val ratesProgram: RatesProgram[F] = RatesProgram[F](ratesService)
+  private val ratesClient: RatesClient[F] = RatesClient[F](config.oneFrameClient)
+
+  private val ratesProgram: RatesProgram[F] = RatesProgram[F](config.program, ratesClient)
 
   private val ratesHttpRoutes: HttpRoutes[F] = new RatesHttpRoutes[F](ratesProgram).routes
 
   type PartialMiddleware = HttpRoutes[F] => HttpRoutes[F]
-  type TotalMiddleware   = HttpApp[F] => HttpApp[F]
+  type TotalMiddleware = HttpApp[F] => HttpApp[F]
 
   private val routesMiddleware: PartialMiddleware = {
     { http: HttpRoutes[F] =>
@@ -26,12 +29,27 @@ class Module[F[_]: Concurrent: Timer](config: ApplicationConfig) {
     }
   }
 
-  private val appMiddleware: TotalMiddleware = { http: HttpApp[F] =>
+  private val reqResLogger: TotalMiddleware = { http: HttpApp[F] =>
+    Logger[F, F](logHeaders = true, logBody = true, FunctionK.id)(http)
+  }
+
+  private val logError: (Throwable, => String) => F[Unit] = { (t, msg) =>
+    Sync[F].delay {
+      logger.error(msg, t)
+    }
+  }
+
+  private val errorLogger: TotalMiddleware = { http: HttpApp[F] =>
+    ErrorHandling.Recover.total(ErrorAction.log(http, logError, logError))
+  }
+
+  private val apiTimeout: TotalMiddleware = { http: HttpApp[F] =>
     Timeout(config.http.timeout)(http)
   }
 
-  private val http: HttpRoutes[F] = ratesHttpRoutes
+  private val appMiddleware: TotalMiddleware = { http: HttpApp[F] =>
+    reqResLogger(errorLogger(apiTimeout(http)))
+  }
 
-  val httpApp: HttpApp[F] = appMiddleware(routesMiddleware(http).orNotFound)
-
+  val httpApp: HttpApp[F] = appMiddleware(routesMiddleware(ratesHttpRoutes).orNotFound)
 }
